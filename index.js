@@ -3,18 +3,42 @@ const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const app = express();
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
 const port = process.env.PORT || 3000;
 
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 // Middleware
-app.use(cors());
+app.use(
+  cors({
+    origin: ["http://localhost:5173"],
+    credentials: true,
+  }),
+);
 app.use(express.json());
+app.use(cookieParser());
+//TODO: __________________JWT VERIFICATION MIDDLEWARE _______________
+const verifyToken = (req, res, next) => {
+  const token = req?.cookies?.token;
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized" });
+  }
+  //* VERIFY TOKEN
+  jwt.verify(token, process.env.jwt_secret, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ message: "Unauthorized" });
+    }
+    console.log("decoded", decoded);
+    req.user = decoded;
+    next();
+  });
+};
 
 // MongoDB connection URI
 const uri = `mongodb+srv://${process.env.DB_NAME}:${process.env.DB_PASSWORD}@cluster0.dgbpvrt.mongodb.net/?appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+// Create a MongoClient
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -32,6 +56,22 @@ async function run() {
   const wishlistCollection = db.collection("wishlist");
   try {
     await client.connect();
+
+    // TODO : ______________ JWT ROUTE __________________________
+    app.post("/jwt", (req, res) => {
+      const { email } = req.body;
+      // console.log("JWT route hit with email:", email);
+      const token = jwt.sign({ email }, process.env.jwt_secret, {
+        expiresIn: "7d",
+      });
+      // SET COOKIE ||||||||||||||||||||
+      res.cookie("token", token, {
+        httpOnly: true,
+        secure: false,
+      });
+      res.send({ token });
+    });
+
     // TODO : _______________ USERS COLLECTION___________________
     // USER GET ALL------->
     app.get("/users", async (req, res) => {
@@ -52,9 +92,11 @@ async function run() {
     // TODO : _______________ BOOKS COLLECTION___________________
     // GET THE BOOKS---->
     app.get("/books", async (req, res) => {
+      const limit = parseInt(req.query.limit);
+      // console.log("limit", limit);
       const result = await bookCollection
         .find({})
-        .limit(8)
+        .limit(limit)
         .sort({ _id: -1 })
         .toArray();
       res.send(result);
@@ -79,7 +121,31 @@ async function run() {
       const result = await bookCollection.insertOne(product);
       res.send(result);
     });
+    // GET ALL BOOKS---->
+    app.get("/all-books", async (req, res) => {
+      const { page = 1, limit = 8, search = "", sort = "newest" } = req.query;
 
+      const query = {
+        $or: [
+          { title: { $regex: search, $options: "i" } },
+          { author: { $regex: search, $options: "i" } },
+        ],
+      };
+      // SORTING
+      let sortOption = {};
+      if (sort === "newest") sortOption = { _id: -1 };
+      else if (sort === "oldest") sortOption = { _id: 1 };
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+
+      const books = await bookCollection
+        .find(query)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .sort(sortOption)
+        .toArray();
+      const total = await bookCollection.countDocuments(query);
+      res.send({ books, total });
+    });
     // TODO : _______________ ORDER ROUTES ______________________
     // ORDER POST--------->
     app.post("/orders", async (req, res) => {
@@ -96,8 +162,12 @@ async function run() {
     });
     //? ______________________user order manage by user____________
     // GET SINGLE ORDER FOR USER----->
-    app.get("/user-orders", async (req, res) => {
+    app.get("/user-orders", verifyToken, async (req, res) => {
       const email = req.query.email;
+      console.log("decoded email", req?.user?.email);
+      if (email !== req?.user?.email) {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
       try {
         const result = await orderCollection
           .find({ buyerEmail: email })
@@ -122,7 +192,7 @@ async function run() {
     // USER PAYMENT HISTORY BY USER
     app.get("/user-payment-history", async (req, res) => {
       const email = req.query.email;
-      console.log("email",email)
+      console.log("email", email);
       try {
         const result = await orderCollection
           .find({ buyerEmail: email, paymentStatus: "paid" })
@@ -134,16 +204,6 @@ async function run() {
     });
     // TODO : _______________ WISHLIST ROUTES ______________________
     // WISHLIST POST--------->
-    // app.post("/wishlist", async (req, res) => {
-    //   try {
-    //     const body = req.body;
-    //     console.log("wishlist body", body);
-    //     const result = await wishlistCollection.insertOne(body);
-    //     res.send(result);
-    //   } catch (error) {
-    //     res.status(500).send({ message: "Server Error", error });
-    //   }
-    // });
     app.post("/wishlist", async (req, res) => {
       try {
         const {
@@ -187,17 +247,6 @@ async function run() {
       }
     });
     // WISHLIST GET--------->
-    // app.get("/wishlist/:email", async (req, res) => {
-    //   const email = req.params.email;
-    //   try {
-    //     const result = await wishlistCollection
-    //       .find({ userEmail: email })
-    //       .toArray();
-    //     res.send(result);
-    //   } catch (error) {
-    //     res.status(500).send({ message: "Server Error", error });
-    //   }
-    // });
     app.get("/wishlist/:email", async (req, res) => {
       try {
         const email = req.params.email;
@@ -224,6 +273,8 @@ async function run() {
         res.status(500).send({ message: "Server Error", error });
       }
     });
+    // RECENTLY VIEWED BOOK
+    app.post("/recently-viewed", async (req, res) => {});
 
     //TODO :_________________ STRIPE PAYMENT______________________
     // CREATE CHECKOUT SESSION----->
@@ -271,7 +322,7 @@ async function run() {
       } catch (error) {
         res.status(500).send({ error: error.message });
       }
-    }); 
+    });
 
     // ! _____________________ping database ________________________
     await client.db("admin").command({ ping: 1 });
